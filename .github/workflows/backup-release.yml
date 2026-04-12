@@ -25,10 +25,12 @@ jobs:
 
       - name: Create backup archive
         run: |
-          tar -czvf backup-${{ steps.date.outputs.DATE }}.tar.gz \
+          # 输出到 /tmp 避免打包时文件变化问题
+          tar -czvf /tmp/backup-${{ steps.date.outputs.DATE }}.tar.gz \
             --exclude='.git' \
             --exclude='*.log' \
             .
+          mv /tmp/backup-${{ steps.date.outputs.DATE }}.tar.gz .
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
