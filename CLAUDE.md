@@ -18,6 +18,20 @@ Private GitHub Repo ──> restore.sh/ps1 ──> ~/.claude/ configs
 - `backup.sh` / `backup.ps1` — Copy configs to `backup/` and push
 - `restore.sh` / `restore.ps1` — Restore configs from `backup/`
 
+### Scheduled Backups (macOS LaunchAgents)
+
+Cron is **deprecated** — macOS Full Disk Access blocks cron from accessing home directories. All scheduled tasks use LaunchAgents instead:
+
+| LaunchAgent | Schedule | Script |
+|-------------|----------|--------|
+| `com.kicker114.claude-code-backup` | Sat 20:00 | `~/.claude/scripts/auto-backup.sh` — backs up `.claude/` to `dot-claude-config` GitHub |
+| `com.kicker114.claude-code-health-check` | Sat 19:55 | `~/.claude/scripts/claude-code-health-check.sh` |
+| `com.kicker114.sunday-backup` | Sun 02:00 | `backup.sh` — tarball backup to this repo |
+| `com.kicker114.memory-cleanup` | Sun 02:00 | `memory-cleanup.sh` |
+| `com.kicker114.claude-code-backup-on-login` | On login | `auto-backup-on-login.sh` — runs if last backup > 7 days ago |
+
+See `~/Library/LaunchAgents/` for all plist files. Use `launchctl list | grep kicker114` to verify status.
+
 ## What Gets Backed Up
 
 `settings.json`, `installed_plugins.json`, `known_marketplaces.json`, `mcp.json` (~/.mcp.json), `keybindings.json`, `CLAUDE.md` (global memory), `projects/` (per-project settings), `commands/` (custom slash commands), `skills/`, `todos/`
@@ -45,3 +59,5 @@ These are intentional design decisions — do not change without understanding m
 - Git operations should warn on failure but not abort the script
 - Bash scripts use `set -euo pipefail`; PowerShell checks `$LASTEXITCODE`
 - Windows scripts need `core.longpaths = true` for git
+- **Git proxy**: This machine uses Clash Verge on `127.0.0.1:7897`. Git needs `http.proxy` set to this — otherwise GitHub is unreachable from China. If Clash is down, push will fail.
+- **Skills symlinks**: `backup.sh` handles circular symlinks (skills pointing into the backup dir) — don't revert that logic.
