@@ -91,9 +91,32 @@ if [[ -d "$CLAUDE_DIR/commands" ]]; then
     ((BACKED_UP++)) || true
 fi
 
-# Skills (non-destructive merge)
+# Skills — additive merge. Circular symlinks (pointing into backup dir) are
+# excluded because their content already lives here.
 if [[ -d "$CLAUDE_DIR/skills" ]]; then
-    rsync -a "$CLAUDE_DIR/skills/" "$BACKUP_DIR/skills/"
+    EXCLUDE_FILE=$(mktemp)
+    for skill in "$CLAUDE_DIR/skills"/*; do
+        name=$(basename "$skill")
+        if [ -L "$skill" ]; then
+            target=$(readlink "$skill")
+            if [[ "$target" == "$BACKUP_DIR"* ]]; then
+                echo "/$name" >> "$EXCLUDE_FILE"
+            else
+                # Symlink points elsewhere — if backup has a stale directory at
+                # this path (leftover from old -L rsync), remove it so rsync can
+                # place the symlink.
+                if [[ -d "$BACKUP_DIR/skills/$name" ]]; then
+                    rm -rf "$BACKUP_DIR/skills/$name"
+                fi
+            fi
+        fi
+    done
+    if [[ -s "$EXCLUDE_FILE" ]]; then
+        rsync -a --exclude-from="$EXCLUDE_FILE" "$CLAUDE_DIR/skills/" "$BACKUP_DIR/skills/"
+    else
+        rsync -a "$CLAUDE_DIR/skills/" "$BACKUP_DIR/skills/"
+    fi
+    rm -f "$EXCLUDE_FILE"
     echo "  [OK] skills/ (merged)"
     ((BACKED_UP++)) || true
 fi

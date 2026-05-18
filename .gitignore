@@ -1,2 +1,7 @@
 # Backup data (stored in a separate private repo)
 backup/
+
+# Log files (generated locally)
+*.log
+.last_backup_timestamp
+.omc/
