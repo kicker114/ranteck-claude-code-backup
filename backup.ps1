@@ -50,14 +50,28 @@ if (Test-Path "$ClaudeDir\plugins\installed_plugins.json") {
     $backedUp += "installed_plugins.json"
 }
 
-# Projects (per-project settings, memory, permissions)
-# Non-destructive: overwrites existing files but preserves remote-only projects
+# Projects (per-project settings & memory)
+# Non-destructive: overwrites existing files but preserves remote-only projects.
+# Session transcripts (.jsonl), subagent logs and tool-results are excluded —
+# they routinely contain credentials (2026-11-15 audit).
 if (Test-Path "$ClaudeDir\projects") {
-    New-Item -ItemType Directory -Force -Path "$BackupDir\projects" | Out-Null
-    Get-ChildItem "$ClaudeDir\projects" | ForEach-Object {
-        Copy-Item $_.FullName "$BackupDir\projects\$($_.Name)" -Recurse -Force
-    }
-    Write-Host "  [OK] projects/ (merged)" -ForegroundColor Green
+    $projectsRoot = (Resolve-Path "$ClaudeDir\projects").Path
+    $destRoot = Join-Path $BackupDir "projects"
+    New-Item -ItemType Directory -Force -Path $destRoot | Out-Null
+    Get-ChildItem $projectsRoot -Recurse -File -Force |
+        Where-Object {
+            $_.Extension -ne ".jsonl" -and
+            $_.FullName -notmatch "\\subagents\\" -and
+            $_.FullName -notmatch "\\tool-results\\" -and
+            $_.FullName -notmatch "\\workflows\\"
+        } |
+        ForEach-Object {
+            $rel = $_.FullName.Substring($projectsRoot.Length).TrimStart("\")
+            $target = Join-Path $destRoot $rel
+            New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
+            Copy-Item $_.FullName $target -Force
+        }
+    Write-Host "  [OK] projects/ (merged; transcripts excluded)" -ForegroundColor Green
     $backedUp += "projects/"
 }
 
@@ -100,12 +114,27 @@ if (Test-Path "$ClaudeDir\commands") {
 }
 
 # Skills (non-destructive merge)
+# Hardcoded-credential test scripts never enter the backup (2026-11-15 audit)
 if (Test-Path "$ClaudeDir\skills") {
     New-Item -ItemType Directory -Force -Path "$BackupDir\skills" | Out-Null
     Get-ChildItem "$ClaudeDir\skills" | ForEach-Object {
-        Copy-Item $_.FullName "$BackupDir\skills\$($_.Name)" -Recurse -Force
+        if ($_.PSIsContainer) {
+            $src = $_.FullName
+            $dst = Join-Path "$BackupDir\skills" $_.Name
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Get-ChildItem $src -Recurse -File -Force |
+                Where-Object { $_.Name -notmatch '^test_kimi_.*\.py$' -and $_.Name -ne 'test_minimax_api.py' } |
+                ForEach-Object {
+                    $rel = $_.FullName.Substring($src.Length).TrimStart("\")
+                    $target = Join-Path $dst $rel
+                    New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
+                    Copy-Item $_.FullName $target -Force
+                }
+        } else {
+            Copy-Item $_.FullName (Join-Path "$BackupDir\skills" $_.Name) -Force
+        }
     }
-    Write-Host "  [OK] skills/ (merged)" -ForegroundColor Green
+    Write-Host "  [OK] skills/ (merged; credential test scripts excluded)" -ForegroundColor Green
     $backedUp += "skills/"
 }
 
@@ -135,6 +164,40 @@ if (-not $NoPush) {
         Write-Host ""
         Write-Host "=== Pushing to private repo ===" -ForegroundColor Cyan
         Write-Host ""
+
+        # --- Credential scan: refuse to push when secrets are found ---
+        $scanLog = Join-Path $PSScriptRoot ".secret-scan.log"
+        $patterns = @(
+            'sk-ant-[A-Za-z0-9_-]{24,}', 'sk-[A-Za-z0-9_-]{24,}',
+            'ghp_[A-Za-z0-9]{20,}', 'github_pat_[A-Za-z0-9_]{20,}',
+            'xox[baprs]-[A-Za-z0-9-]{10,}', 'AKIA[0-9A-Z]{16}',
+            'AIza[0-9A-Za-z_-]{30,}', '[0-9]{8,}:[A-Za-z0-9_-]{30,}'
+        )
+        $rx = [regex]::new(($patterns -join '|'))
+        $hits = @()
+        Get-ChildItem $BackupDir -Recurse -File -Force |
+            Where-Object {
+                $_.FullName -notmatch '\\\.git\\' -and
+                $_.FullName -notmatch '\\node_modules\\' -and
+                $_.Length -lt 20MB
+            } |
+            ForEach-Object {
+                try { $text = [IO.File]::ReadAllText($_.FullName) } catch { return }
+                $n = $rx.Matches($text).Count
+                if ($n -gt 0) {
+                    $hits += [pscustomobject]@{ Rel = $_.FullName.Substring($BackupDir.Length); Count = $n }
+                }
+            }
+        $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        if ($hits.Count -gt 0) {
+            Add-Content -Path $scanLog -Value "[$stamp] 发现 $($hits.Count) 个文件含凭据，已阻止推送" -Encoding utf8
+            $hits | ForEach-Object {
+                Add-Content -Path $scanLog -Value ("  {0,5}  {1}" -f $_.Count, $_.Rel) -Encoding utf8
+            }
+            Write-Host "  [ERROR] Credential scan found secrets — push aborted. Details: $scanLog" -ForegroundColor Red
+            exit 1
+        }
+        Add-Content -Path $scanLog -Value "[$stamp] 扫描通过（0 命中）" -Encoding utf8
 
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Push-Location $BackupDir

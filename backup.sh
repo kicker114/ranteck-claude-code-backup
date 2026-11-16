@@ -55,11 +55,18 @@ if [[ -f "$CLAUDE_DIR/plugins/known_marketplaces.json" ]]; then
     ((BACKED_UP++)) || true
 fi
 
-# Projects (per-project settings, memory, permissions)
-# Non-destructive: overwrites existing files but preserves remote-only projects
+# Projects (per-project settings & memory)
+# Non-destructive: overwrites existing files but preserves remote-only projects.
+# Session transcripts (.jsonl), subagent logs and tool-results are excluded —
+# they routinely contain credentials (2026-11-15 audit).
 if [[ -d "$CLAUDE_DIR/projects" ]]; then
-    rsync -a "$CLAUDE_DIR/projects/" "$BACKUP_DIR/projects/"
-    echo "  [OK] projects/ (merged)"
+    rsync -a \
+        --exclude '*.jsonl' \
+        --exclude 'subagents/' \
+        --exclude 'tool-results/' \
+        --exclude 'workflows/' \
+        "$CLAUDE_DIR/projects/" "$BACKUP_DIR/projects/"
+    echo "  [OK] projects/ (merged; transcripts excluded)"
     ((BACKED_UP++)) || true
 fi
 
@@ -111,10 +118,12 @@ if [[ -d "$CLAUDE_DIR/skills" ]]; then
             fi
         fi
     done
+    # Hardcoded-credential test scripts never enter the backup (2026-11-15 audit)
+    SKILL_EXCLUDES=(--exclude 'text-segmenter-v*/test_kimi_*.py' --exclude 'text-segmenter-v*/test_minimax_api.py')
     if [[ -s "$EXCLUDE_FILE" ]]; then
-        rsync -a --exclude-from="$EXCLUDE_FILE" "$CLAUDE_DIR/skills/" "$BACKUP_DIR/skills/"
+        rsync -a --exclude-from="$EXCLUDE_FILE" "${SKILL_EXCLUDES[@]}" "$CLAUDE_DIR/skills/" "$BACKUP_DIR/skills/"
     else
-        rsync -a "$CLAUDE_DIR/skills/" "$BACKUP_DIR/skills/"
+        rsync -a "${SKILL_EXCLUDES[@]}" "$CLAUDE_DIR/skills/" "$BACKUP_DIR/skills/"
     fi
     rm -f "$EXCLUDE_FILE"
     echo "  [OK] skills/ (merged)"
@@ -142,6 +151,58 @@ if [[ "$NO_PUSH" == false ]] && [[ -d "$BACKUP_DIR/.git" ]]; then
     echo ""
     echo "=== Pushing to private repo ==="
     echo ""
+
+    # --- Credential scan: refuse to push when secrets are found ---
+    SECRET_SCAN_LOG="$SCRIPT_DIR/.secret-scan.log"
+    if ! python3 - "$BACKUP_DIR" "$SECRET_SCAN_LOG" <<'PYSCAN'
+import os, re, sys, datetime
+
+root, log = sys.argv[1], sys.argv[2]
+PATTERNS = [
+    r"sk-ant-[A-Za-z0-9_-]{24,}",
+    r"sk-[A-Za-z0-9_-]{24,}",
+    r"ghp_[A-Za-z0-9]{20,}",
+    r"github_pat_[A-Za-z0-9_]{20,}",
+    r"xox[baprs]-[A-Za-z0-9-]{10,}",
+    r"AKIA[0-9A-Z]{16}",
+    r"AIza[0-9A-Za-z_-]{30,}",
+    r"[0-9]{8,}:[A-Za-z0-9_-]{30,}",
+]
+rx = re.compile("|".join("(?:" + p + ")" for p in PATTERNS).encode())
+SKIP_DIRS = {".git", "node_modules"}
+hits = []
+for dp, dn, fn in os.walk(root):
+    dn[:] = [d for d in dn if d not in SKIP_DIRS]
+    for f in fn:
+        fp = os.path.join(dp, f)
+        try:
+            if os.path.getsize(fp) > 20 * 1024 * 1024:
+                continue
+            with open(fp, "rb") as fh:
+                n = len(rx.findall(fh.read()))
+        except OSError:
+            continue
+        if n:
+            hits.append((os.path.relpath(fp, root), n))
+stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+with open(log, "a", encoding="utf-8") as fh:
+    if hits:
+        fh.write("[%s] 发现 %d 个文件含凭据，已阻止推送\n" % (stamp, len(hits)))
+        for path, n in sorted(hits):
+            fh.write("  %5d  %s\n" % (n, path))
+    else:
+        fh.write("[%s] 扫描通过（0 命中）\n" % stamp)
+if hits:
+    for path, n in sorted(hits)[:10]:
+        print("  [HIT] %4d  %s" % (n, path))
+    sys.exit(1)
+PYSCAN
+    then
+        echo ""
+        echo "  [ERROR] Credential scan found secrets — push aborted."
+        echo "          Details: $SECRET_SCAN_LOG"
+        exit 1
+    fi
 
     TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
     cd "$BACKUP_DIR"
